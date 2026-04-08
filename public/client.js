@@ -1,553 +1,924 @@
-const els = {
-  video: document.getElementById('video'),
-  overlay: document.getElementById('overlay'),
-  videoEmpty: document.getElementById('videoEmpty'),
-  remoteVideo: document.getElementById('remoteVideo'),
-  remoteEmpty: document.getElementById('remoteEmpty'),
-  startCameraBtn: document.getElementById('startCameraBtn'),
-  drawModeBtn: document.getElementById('drawModeBtn'),
-  clearBoxesBtn: document.getElementById('clearBoxesBtn'),
-  cameraSelect: document.getElementById('cameraSelect'),
-  hotspotLabel: document.getElementById('hotspotLabel'),
-  cardSearchInput: document.getElementById('cardSearchInput'),
-  searchBtn: document.getElementById('searchBtn'),
-  searchResults: document.getElementById('searchResults'),
-  cardDetails: document.getElementById('cardDetails'),
-  boxList: document.getElementById('boxList'),
-  exportBtn: document.getElementById('exportBtn'),
-  importInput: document.getElementById('importInput'),
-  modeBadge: document.getElementById('modeBadge'),
-  resultTemplate: document.getElementById('resultTemplate'),
-  roomIdInput: document.getElementById('roomIdInput'),
-  playerNameInput: document.getElementById('playerNameInput'),
-  sideSelect: document.getElementById('sideSelect'),
-  joinRoomBtn: document.getElementById('joinRoomBtn'),
-  copyRoomBtn: document.getElementById('copyRoomBtn'),
-  roomStatus: document.getElementById('roomStatus'),
-  syncStatus: document.getElementById('syncStatus'),
-  localBadge: document.getElementById('localBadge'),
-  remoteBadge: document.getElementById('remoteBadge'),
-  selfLpInput: document.getElementById('selfLpInput'),
-  opponentLpInput: document.getElementById('opponentLpInput'),
-  phaseSelect: document.getElementById('phaseSelect'),
-  roster: document.getElementById('roster')
-};
-
-const ctx = els.overlay.getContext('2d');
-const playerId = crypto.randomUUID();
-let ws;
-let stream;
-let drawMode = false;
-let drawing = null;
-let selectedBoxId = null;
-let peerConnection = null;
-let currentPeerId = null;
-
-const state = {
-  roomId: '',
-  me: { name: 'Player', side: 'self' },
-  roster: [],
-  hotspots: [],
-  match: { selfLp: 8000, opponentLp: 8000, phase: 'Draw Phase' }
-};
-
-let rtcConfig = {
-  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-};
-let publicBaseUrl = '';
-
-
-function updateModeBadge() {
-  els.modeBadge.textContent = `Mode: ${drawMode ? 'Draw' : 'View'}`;
-}
-function capitalize(v) { return v.charAt(0).toUpperCase() + v.slice(1); }
-function myHotspots() { return state.hotspots.filter(h => h.ownerId === playerId); }
-function resizeCanvas() {
-  const rect = els.overlay.getBoundingClientRect();
-  els.overlay.width = rect.width;
-  els.overlay.height = rect.height;
-  drawOverlay();
-}
-async function loadCameras() {
-  const devices = await navigator.mediaDevices.enumerateDevices();
-  const cams = devices.filter(d => d.kind === 'videoinput');
-  els.cameraSelect.innerHTML = '';
-  cams.forEach((cam, i) => {
-    const opt = document.createElement('option');
-    opt.value = cam.deviceId;
-    opt.textContent = cam.label || `Camera ${i + 1}`;
-    els.cameraSelect.appendChild(opt);
-  });
-}
-async function startCamera() {
-  if (stream) stream.getTracks().forEach(t => t.stop());
-  const deviceId = els.cameraSelect.value;
-  stream = await navigator.mediaDevices.getUserMedia({
-    video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: 'environment' },
-    audio: true
-  });
-  els.video.srcObject = stream;
-  await els.video.play();
-  els.videoEmpty.style.display = 'none';
-  await loadCameras();
-  resizeCanvas();
-  els.syncStatus.textContent = 'Camera live.';
-  if (peerConnection) {
-    teardownPeer();
-    maybeConnectToPeer();
-  }
-}
-function pointerPosition(event) {
-  const rect = els.overlay.getBoundingClientRect();
-  return { x: event.clientX - rect.left, y: event.clientY - rect.top };
-}
-function normalizeRect(start, end) {
-  return {
-    x: Math.min(start.x, end.x),
-    y: Math.min(start.y, end.y),
-    width: Math.abs(end.x - start.x),
-    height: Math.abs(end.y - start.y)
+(() => {
+  const els = {
+    startCameraBtn: document.getElementById('startCameraBtn'),
+    enableAudioBtn: document.getElementById('enableAudioBtn'),
+    joinRoomBtn: document.getElementById('joinRoomBtn'),
+    copyRoomBtn: document.getElementById('copyRoomBtn'),
+    roomIdInput: document.getElementById('roomIdInput'),
+    playerNameInput: document.getElementById('playerNameInput'),
+    sideSelect: document.getElementById('sideSelect'),
+    roomStatus: document.getElementById('roomStatus'),
+    syncStatus: document.getElementById('syncStatus'),
+    modeBadge: document.getElementById('modeBadge'),
+    localBadge: document.getElementById('localBadge'),
+    remoteBadge: document.getElementById('remoteBadge'),
+    video: document.getElementById('video'),
+    remoteVideo: document.getElementById('remoteVideo'),
+    remoteOverlay: document.getElementById('remoteOverlay'),
+    videoEmpty: document.getElementById('videoEmpty'),
+    remoteEmpty: document.getElementById('remoteEmpty'),
+    cameraSelect: document.getElementById('cameraSelect'),
+    cardSearchInput: document.getElementById('cardSearchInput'),
+    searchBtn: document.getElementById('searchBtn'),
+    searchResults: document.getElementById('searchResults'),
+    cardDetails: document.getElementById('cardDetails'),
+    scanPreview: document.getElementById('scanPreview'),
+    selfLpInput: document.getElementById('selfLpInput'),
+    opponentLpInput: document.getElementById('opponentLpInput'),
+    phaseSelect: document.getElementById('phaseSelect'),
+    roster: document.getElementById('roster'),
+    resultTemplate: document.getElementById('resultTemplate'),
+    remoteShell: document.getElementById('remoteShell')
   };
-}
-function drawOverlay() {
-  ctx.clearRect(0, 0, els.overlay.width, els.overlay.height);
-  myHotspots().forEach(box => {
-    ctx.strokeStyle = box.id === selectedBoxId ? '#fff' : '#60a5fa';
-    ctx.lineWidth = box.id === selectedBoxId ? 3 : 2;
-    ctx.strokeRect(box.x, box.y, box.width, box.height);
-    ctx.fillStyle = 'rgba(96,165,250,.16)';
-    ctx.fillRect(box.x, box.y, box.width, box.height);
-    ctx.fillStyle = '#e5e7eb';
-    ctx.font = '12px Arial';
-    ctx.fillText((box.card?.name || box.label || 'Unassigned').slice(0, 26), box.x + 6, Math.max(14, box.y - 5));
-  });
-  if (drawing) {
-    const rect = normalizeRect(drawing.start, drawing.end);
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
-  }
-}
-function renderRoster() {
-  if (!state.roster.length) {
-    els.roster.textContent = 'Players: none';
-    return;
-  }
-  els.roster.textContent = `Players: ${state.roster.map(p => `${p.name} (${capitalize(p.side)})`).join(', ')}`;
-}
-function renderRemoteStatus() {
-  const peer = state.roster.find(p => p.playerId !== playerId);
-  els.remoteBadge.textContent = peer ? `Connected target: ${peer.name}` : 'Waiting for peer';
-}
-function renderBoxList() {
-  if (!state.hotspots.length) {
-    els.boxList.className = 'box-list empty';
-    els.boxList.textContent = 'No hotspots yet.';
-    return;
-  }
-  els.boxList.className = 'box-list';
-  els.boxList.innerHTML = '';
-  state.hotspots.forEach((box, index) => {
-    const div = document.createElement('div');
-    div.className = 'box-item';
-    const mine = box.ownerId === playerId;
-    div.innerHTML = `
-      <div class="box-row">
-        <strong>${box.ownerName} · Box ${index + 1}</strong>
-        <div class="box-actions">
-          <button class="secondary select-btn">Select</button>
-          ${mine ? '<button class="danger delete-btn">Delete</button>' : ''}
-        </div>
-      </div>
-      <p>${box.card?.name || box.label || 'Unassigned hotspot'}</p>
-      <p>${capitalize(box.ownerSide)} · ${Math.round(box.width)}×${Math.round(box.height)}</p>
-    `;
-    div.querySelector('.select-btn').onclick = () => {
-      selectedBoxId = box.id;
-      if (box.card) showCardDetails(box.card, box);
-      renderAll();
-    };
-    if (mine) {
-      div.querySelector('.delete-btn').onclick = () => {
-        state.hotspots = state.hotspots.filter(h => h.id !== box.id);
-        if (selectedBoxId === box.id) selectedBoxId = null;
-        pushState();
-        renderAll();
-      };
-    }
-    els.boxList.appendChild(div);
-  });
-}
-function showCardDetails(card, box) {
-  els.cardDetails.className = 'card-details';
-  els.cardDetails.innerHTML = `
-    <div class="details-card">
-      <img src="${card.image_url || ''}" alt="${card.name}" />
-      <div>
-        <h3>${card.name}</h3>
-        <p>${card.type || ''}${card.race ? ` · ${card.race}` : ''}${card.attribute ? ` · ${card.attribute}` : ''}</p>
-        ${card.level ? `<p>Level/Rank/Link: ${card.level}</p>` : ''}
-        ${(card.atk !== undefined || card.def !== undefined) ? `<p>ATK ${card.atk ?? '?'} / DEF ${card.def ?? '?'}</p>` : ''}
-        ${box ? `<p>Mapped by ${box.ownerName} on ${capitalize(box.ownerSide)} side</p>` : ''}
-        <p>${card.desc || 'No description available.'}</p>
-      </div>
-    </div>
-  `;
-}
-function renderSearchResults(cards, term) {
-  if (!cards.length) {
-    els.searchResults.className = 'search-results empty';
-    els.searchResults.textContent = `No card results for "${term}".`;
-    return;
-  }
-  els.searchResults.className = 'search-results';
-  els.searchResults.innerHTML = '';
-  cards.forEach(card => {
-    const node = els.resultTemplate.content.firstElementChild.cloneNode(true);
-    node.querySelector('img').src = card.image_url || '';
-    node.querySelector('.name').textContent = card.name;
-    node.querySelector('.type').textContent = [card.type, card.attribute, card.race].filter(Boolean).join(' · ');
-    node.querySelector('.desc').textContent = (card.desc || '').slice(0, 120);
-    node.onclick = () => assignCardToSelected(card);
-    els.searchResults.appendChild(node);
-  });
-}
-function assignCardToSelected(card) {
-  const box = state.hotspots.find(h => h.id === selectedBoxId && h.ownerId === playerId);
-  if (!box) {
-    els.syncStatus.textContent = 'Select one of your hotspots first.';
-    return;
-  }
-  box.card = card;
-  showCardDetails(card, box);
-  pushState();
-  renderAll();
-}
-async function searchCards() {
-  const term = els.cardSearchInput.value.trim();
-  if (!term) return;
-  let cards = [];
-  try {
-    const response = await fetch(`https://db.ygoprodeck.com/api/v7/cardinfo.php?fname=${encodeURIComponent(term)}`);
-    if (!response.ok) throw new Error('API failed');
-    const data = await response.json();
-    cards = (data.data || []).slice(0, 8).map(mapApiCard);
-  } catch {
-    cards = (window.SAMPLE_CARDS || []).filter(card => card.name.toLowerCase().includes(term.toLowerCase())).slice(0, 8);
-  }
-  renderSearchResults(cards, term);
-  els.syncStatus.textContent = `Found ${cards.length} result(s).`;
-}
-function mapApiCard(card) {
-  return {
-    name: card.name,
-    type: card.type,
-    race: card.race,
-    attribute: card.attribute,
-    level: card.level || card.linkval || card.rank,
-    atk: card.atk,
-    def: card.def,
-    desc: card.desc,
-    image_url: card.card_images?.[0]?.image_url || ''
-  };
-}
-function createBox(rect) {
-  const box = {
-    id: crypto.randomUUID(),
-    ownerId: playerId,
-    ownerName: state.me.name,
-    ownerSide: state.me.side,
-    label: els.hotspotLabel.value.trim(),
-    ...rect,
-    card: null
-  };
-  state.hotspots.push(box);
-  selectedBoxId = box.id;
-  pushState();
-  renderAll();
-}
-function renderStateFields() {
-  els.selfLpInput.value = state.match.selfLp;
-  els.opponentLpInput.value = state.match.opponentLp;
-  els.phaseSelect.value = state.match.phase;
-  els.localBadge.textContent = `Local side: ${capitalize(state.me.side)}`;
-}
-function renderAll() {
-  renderStateFields();
-  renderRoster();
-  renderRemoteStatus();
-  renderBoxList();
-  drawOverlay();
-}
 
-async function loadRuntimeConfig() {
-  try {
-    const response = await fetch('/config');
-    if (!response.ok) return;
-    const config = await response.json();
-    if (Array.isArray(config.iceServers) && config.iceServers.length) {
-      rtcConfig = { iceServers: config.iceServers };
-    }
-    publicBaseUrl = config.publicBaseUrl || '';
-    if (config.hasTurn) {
-      els.syncStatus.textContent = 'TURN relay configured.';
-    }
-  } catch {}
-}
-
-function connectSocket() {
-  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${protocol}//${location.host}`);
-  ws.onopen = () => {
-    els.syncStatus.textContent = 'Socket connected.';
-    joinRoom();
-  };
-  ws.onmessage = async evt => {
-    const msg = JSON.parse(evt.data);
-    if (msg.type === 'room-joined') {
-      state.roomId = msg.roomId;
-      state.roster = msg.roster || [];
-      if (msg.sharedState) {
-        state.hotspots = msg.sharedState.hotspots || [];
-        state.match = msg.sharedState.match || state.match;
+  const state = {
+    config: {
+      publicBaseUrl: '',
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      hasTurn: false
+    },
+    socket: null,
+    socketOpen: false,
+    joined: false,
+    roomId: '',
+    playerId: `Player-${Math.floor(Math.random() * 100000)}`,
+    playerName: '',
+    side: 'self',
+    localStream: null,
+    remoteStream: null,
+    peerConnection: null,
+    peerTargetId: null,
+    roster: [],
+    latestResults: [],
+    sharedState: {
+      match: {
+        selfLp: 8000,
+        opponentLp: 8000,
+        phase: 'Draw Phase'
       }
-      els.roomStatus.textContent = `Connected to room: ${msg.roomId}`;
-      renderAll();
-      maybeConnectToPeer();
-    }
-    if (msg.type === 'room-roster') {
-      state.roster = msg.roster || [];
-      renderAll();
-      maybeConnectToPeer();
-    }
-    if (msg.type === 'state-update') {
-      state.hotspots = msg.state.hotspots || [];
-      state.match = msg.state.match || state.match;
-      renderAll();
-      els.syncStatus.textContent = 'Room synced.';
-    }
-    if (msg.type === 'peer-left') {
-      if (msg.playerId === currentPeerId) {
-        teardownPeer();
-      }
-    }
-    if (msg.type === 'signal') {
-      await handleSignal(msg.fromPlayerId, msg.signal);
-    }
-    if (msg.type === 'error') {
-      els.syncStatus.textContent = msg.message;
-    }
+    },
+    scanning: false
   };
-  ws.onclose = () => {
-    els.syncStatus.textContent = 'Socket disconnected.';
-    teardownPeer();
-  };
-}
-function joinRoom() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const roomId = els.roomIdInput.value.trim() || 'duel-room';
-  state.me.name = els.playerNameInput.value.trim() || 'Player';
-  state.me.side = els.sideSelect.value;
-  ws.send(JSON.stringify({
-    type: 'join-room',
-    roomId,
-    playerId,
-    name: state.me.name,
-    side: state.me.side
-  }));
-}
-function pushState() {
-  if (!ws || ws.readyState !== WebSocket.OPEN || !state.roomId) return;
-  ws.send(JSON.stringify({
-    type: 'state-update',
-    state: {
-      hotspots: state.hotspots,
-      match: state.match
-    }
-  }));
-}
-function getPeerTarget() {
-  return state.roster.find(p => p.playerId !== playerId) || null;
-}
-function maybeConnectToPeer() {
-  const peer = getPeerTarget();
-  if (!peer) return;
-  if (currentPeerId === peer.playerId && peerConnection) return;
-  const shouldInitiate = playerId < peer.playerId;
-  setupPeer(peer.playerId, shouldInitiate);
-}
-function setupPeer(targetPlayerId, initiator) {
-  teardownPeer();
-  currentPeerId = targetPlayerId;
-  peerConnection = new RTCPeerConnection(rtcConfig);
-  if (stream) {
-    stream.getTracks().forEach(track => peerConnection.addTrack(track, stream));
+
+  async function init() {
+    bindEvents();
+    hydrateFromUrl();
+    await loadConfig();
+    await loadCameras();
+    updateBadges();
+    updateRoster([]);
+    renderResults([]);
+    renderSelectedCard(null);
+    resizeRemoteOverlay();
+    window.addEventListener('resize', resizeRemoteOverlay);
   }
-  peerConnection.onicecandidate = event => {
-    if (event.candidate) {
-      ws.send(JSON.stringify({
+
+  function bindEvents() {
+    els.startCameraBtn.addEventListener('click', startCamera);
+    els.enableAudioBtn.addEventListener('click', enableOpponentAudio);
+    els.joinRoomBtn.addEventListener('click', joinRoom);
+    els.copyRoomBtn.addEventListener('click', copyRoomLink);
+    els.searchBtn.addEventListener('click', onManualSearch);
+    els.cardSearchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') onManualSearch();
+    });
+
+    els.cameraSelect.addEventListener('change', async () => {
+      if (state.localStream) {
+        await startCamera();
+      }
+    });
+
+    els.sideSelect.addEventListener('change', () => {
+      state.side = els.sideSelect.value;
+      updateBadges();
+    });
+
+    els.selfLpInput.addEventListener('change', syncMatchTools);
+    els.opponentLpInput.addEventListener('change', syncMatchTools);
+    els.phaseSelect.addEventListener('change', syncMatchTools);
+
+    document.querySelectorAll('[data-lp-target]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const target = btn.dataset.lpTarget;
+        const delta = Number(btn.dataset.lpDelta || 0);
+        const input = target === 'self' ? els.selfLpInput : els.opponentLpInput;
+        input.value = String(Number(input.value || 0) + delta);
+        syncMatchTools();
+      });
+    });
+
+    els.remoteVideo.addEventListener('loadedmetadata', () => {
+      resizeRemoteOverlay();
+    });
+
+    els.remoteVideo.addEventListener('click', onRemoteVideoClick);
+  }
+
+  function hydrateFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const room = params.get('room');
+    const name = params.get('name');
+    const side = params.get('side');
+
+    if (room) els.roomIdInput.value = room;
+    if (name) els.playerNameInput.value = name;
+    if (side === 'self' || side === 'opponent') {
+      els.sideSelect.value = side;
+      state.side = side;
+    }
+  }
+
+  async function loadConfig() {
+    try {
+      const res = await fetch('/config');
+      if (!res.ok) throw new Error('Config request failed');
+      const data = await res.json();
+      if (data && Array.isArray(data.iceServers)) {
+        state.config = data;
+      }
+    } catch (err) {
+      console.warn('Falling back to default config:', err);
+    }
+  }
+
+  async function loadCameras() {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cameras = devices.filter(d => d.kind === 'videoinput');
+      els.cameraSelect.innerHTML = '';
+
+      cameras.forEach((camera, index) => {
+        const option = document.createElement('option');
+        option.value = camera.deviceId;
+        option.textContent = camera.label || `Camera ${index + 1}`;
+        els.cameraSelect.appendChild(option);
+      });
+    } catch (err) {
+      console.warn('Could not enumerate cameras:', err);
+    }
+  }
+
+  async function startCamera() {
+    try {
+      setSyncStatus('Starting camera...');
+      const deviceId = els.cameraSelect.value;
+
+      if (state.localStream) {
+        state.localStream.getTracks().forEach(track => track.stop());
+        state.localStream = null;
+      }
+
+      state.localStream = await navigator.mediaDevices.getUserMedia({
+        video: deviceId
+          ? {
+              deviceId: { exact: deviceId },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 }
+            }
+          : {
+              facingMode: 'environment',
+              width: { ideal: 1920 },
+              height: { ideal: 1080 }
+            },
+        audio: true
+      });
+
+      els.video.srcObject = state.localStream;
+      els.videoEmpty.style.display = 'none';
+      setRoomStatus(state.joined ? `Connected to room: ${state.roomId}` : 'Camera live.');
+      setSyncStatus('Camera live.');
+
+      await loadCameras();
+
+      if (state.joined) {
+        await renegotiatePeer(true);
+      }
+    } catch (err) {
+      console.error(err);
+      setSyncStatus('Camera error.');
+      alert('Could not start camera/mic. Check browser permissions.');
+    }
+  }
+
+  function enableOpponentAudio() {
+    els.remoteVideo.muted = false;
+    els.remoteVideo.volume = 1;
+    els.remoteVideo.play().catch(() => {});
+    els.enableAudioBtn.textContent = 'Opponent Audio Enabled';
+    els.enableAudioBtn.disabled = true;
+  }
+
+  function updateBadges() {
+    els.localBadge.textContent = `Local side: ${state.side === 'self' ? 'Self' : 'Opponent'}`;
+  }
+
+  function setRoomStatus(text) {
+    els.roomStatus.textContent = text;
+  }
+
+  function setSyncStatus(text) {
+    els.syncStatus.textContent = text;
+  }
+
+  function setMode(text) {
+    els.modeBadge.textContent = text;
+  }
+
+  function getSocketUrl() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${window.location.host}`;
+  }
+
+  function ensureSocket() {
+    return new Promise((resolve, reject) => {
+      if (state.socket && state.socket.readyState === WebSocket.OPEN) {
+        state.socketOpen = true;
+        resolve();
+        return;
+      }
+
+      state.socket = new WebSocket(getSocketUrl());
+
+      state.socket.addEventListener('open', () => {
+        state.socketOpen = true;
+        setSyncStatus('Connected.');
+        resolve();
+      }, { once: true });
+
+      state.socket.addEventListener('error', (err) => {
+        console.error('Socket error:', err);
+        state.socketOpen = false;
+        setSyncStatus('Connection failed.');
+        reject(new Error('Socket connection failed'));
+      }, { once: true });
+
+      state.socket.addEventListener('close', () => {
+        state.socketOpen = false;
+        state.joined = false;
+        setRoomStatus('Socket disconnected.');
+      });
+
+      state.socket.addEventListener('message', onSocketMessage);
+    });
+  }
+
+  async function joinRoom() {
+    const roomId = els.roomIdInput.value.trim();
+    const playerName = (els.playerNameInput.value.trim() || state.playerId).slice(0, 40);
+    const side = els.sideSelect.value;
+
+    if (!roomId) {
+      alert('Enter a room ID first.');
+      return;
+    }
+
+    try {
+      setSyncStatus('Connecting...');
+      await ensureSocket();
+
+      state.roomId = roomId;
+      state.playerName = playerName;
+      state.side = side;
+      updateBadges();
+
+      sendSocket({
+        type: 'join-room',
+        roomId,
+        playerId: state.playerId,
+        name: playerName,
+        side
+      });
+
+      const url = new URL(window.location.href);
+      url.searchParams.set('room', roomId);
+      url.searchParams.set('name', playerName);
+      url.searchParams.set('side', side);
+      window.history.replaceState({}, '', url.toString());
+
+      setSyncStatus('Joining room...');
+    } catch (err) {
+      console.error(err);
+      setSyncStatus('Connection failed.');
+      alert('Could not connect to the room server.');
+    }
+  }
+
+  function copyRoomLink() {
+    const roomId = els.roomIdInput.value.trim();
+    if (!roomId) {
+      alert('Enter a room ID first.');
+      return;
+    }
+
+    const base = state.config.publicBaseUrl || window.location.origin;
+    const url = new URL(base);
+    url.searchParams.set('room', roomId);
+    url.searchParams.set('side', state.side);
+
+    navigator.clipboard.writeText(url.toString())
+      .then(() => {
+        setSyncStatus('Room link copied.');
+      })
+      .catch(() => {
+        setSyncStatus('Could not copy link.');
+      });
+  }
+
+  function sendSocket(payload) {
+    if (!state.socket || state.socket.readyState !== WebSocket.OPEN) return;
+    state.socket.send(JSON.stringify(payload));
+  }
+
+  async function onSocketMessage(event) {
+    let message;
+    try {
+      message = JSON.parse(event.data);
+    } catch (err) {
+      console.warn('Bad socket message:', err);
+      return;
+    }
+
+    switch (message.type) {
+      case 'room-joined':
+        state.joined = true;
+        state.roomId = message.roomId;
+        state.sharedState = message.sharedState || state.sharedState;
+        setRoomStatus(`Connected to room: ${message.roomId}`);
+        setSyncStatus('Joined room.');
+        applySharedState(state.sharedState);
+        updateRoster(message.roster || []);
+        await attachToExistingPeer(message.roster || []);
+        break;
+
+      case 'room-roster':
+        updateRoster(message.roster || []);
+        break;
+
+      case 'peer-joined':
+        updatePeerBadge(message.playerId);
+        await attachToKnownPeer(message.playerId, true);
+        break;
+
+      case 'peer-left':
+        if (message.playerId === state.peerTargetId) {
+          state.peerTargetId = null;
+          els.remoteVideo.srcObject = null;
+          els.remoteEmpty.style.display = 'flex';
+          els.remoteBadge.textContent = 'Peer left room';
+          els.enableAudioBtn.disabled = true;
+          closePeerConnection();
+        }
+        break;
+
+      case 'state-update':
+        if (message.state) {
+          state.sharedState = message.state;
+          applySharedState(message.state);
+        }
+        break;
+
+      case 'signal':
+        await handleSignalMessage(message);
+        break;
+
+      case 'error':
+        console.error(message.message);
+        setSyncStatus(`Error: ${message.message}`);
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  function updateRoster(roster) {
+    state.roster = roster;
+    if (!Array.isArray(roster) || roster.length === 0) {
+      els.roster.textContent = 'Players: none';
+      return;
+    }
+
+    const text = roster
+      .map(player => `${player.name} (${player.side === 'self' ? 'Self' : 'Opponent'})`)
+      .join(', ');
+
+    els.roster.textContent = `Players: ${text}`;
+  }
+
+  function updatePeerBadge(playerId) {
+    els.remoteBadge.textContent = playerId ? `Connected target: ${playerId}` : 'Waiting for peer';
+  }
+
+  async function attachToExistingPeer(roster) {
+    const peer = (roster || []).find(p => p.playerId !== state.playerId);
+    if (!peer) {
+      updatePeerBadge(null);
+      return;
+    }
+    await attachToKnownPeer(peer.playerId, true);
+  }
+
+  async function attachToKnownPeer(peerId, shouldOffer) {
+    if (!peerId) return;
+    state.peerTargetId = peerId;
+    updatePeerBadge(peerId);
+    await ensurePeerConnection();
+
+    if (shouldOffer) {
+      await makeOffer();
+    }
+  }
+
+  async function ensurePeerConnection() {
+    if (state.peerConnection) return state.peerConnection;
+
+    const pc = new RTCPeerConnection({
+      iceServers: state.config.iceServers
+    });
+
+    pc.onicecandidate = (event) => {
+      if (!event.candidate || !state.peerTargetId) return;
+      sendSocket({
         type: 'signal',
-        targetPlayerId,
-        signal: { type: 'candidate', candidate: event.candidate }
-      }));
-    }
-  };
-  peerConnection.ontrack = event => {
-    els.remoteVideo.srcObject = event.streams[0];
-    els.remoteEmpty.style.display = 'none';
-  };
-  peerConnection.onconnectionstatechange = () => {
-    els.syncStatus.textContent = `Peer: ${peerConnection.connectionState}`;
-    if (['failed', 'disconnected', 'closed'].includes(peerConnection.connectionState)) {
-      els.remoteEmpty.style.display = 'grid';
-    }
-  };
-  if (initiator) createOffer(targetPlayerId);
-}
-async function createOffer(targetPlayerId) {
-  if (!peerConnection) return;
-  const offer = await peerConnection.createOffer();
-  await peerConnection.setLocalDescription(offer);
-  ws.send(JSON.stringify({
-    type: 'signal',
-    targetPlayerId,
-    signal: { type: 'offer', sdp: offer }
-  }));
-}
-async function renegotiate() {
-  if (!peerConnection || !currentPeerId) return;
-  const offer = await peerConnection.createOffer();
-  await peerConnection.setLocalDescription(offer);
-  ws.send(JSON.stringify({
-    type: 'signal',
-    targetPlayerId: currentPeerId,
-    signal: { type: 'offer', sdp: offer }
-  }));
-}
-async function handleSignal(fromPlayerId, signal) {
-  if (!peerConnection || currentPeerId !== fromPlayerId) setupPeer(fromPlayerId, false);
-  if (signal.type === 'offer') {
-    await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-    const answer = await peerConnection.createAnswer();
-    await peerConnection.setLocalDescription(answer);
-    ws.send(JSON.stringify({
-      type: 'signal',
-      targetPlayerId: fromPlayerId,
-      signal: { type: 'answer', sdp: answer }
-    }));
-  } else if (signal.type === 'answer') {
-    await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-  } else if (signal.type === 'candidate') {
-    try {
-      await peerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
-    } catch {}
-  }
-}
-function teardownPeer() {
-  currentPeerId = null;
-  if (peerConnection) {
-    peerConnection.ontrack = null;
-    peerConnection.onicecandidate = null;
-    peerConnection.close();
-    peerConnection = null;
-  }
-  els.remoteVideo.srcObject = null;
-  els.remoteEmpty.style.display = 'grid';
-}
-function exportState() {
-  const blob = new Blob([JSON.stringify({ hotspots: state.hotspots, match: state.match }, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `${state.roomId || 'room'}-state.json`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-function importState(file) {
-  const reader = new FileReader();
-  reader.onload = () => {
-    try {
-      const parsed = JSON.parse(reader.result);
-      state.hotspots = parsed.hotspots || [];
-      state.match = parsed.match || state.match;
-      pushState();
-      renderAll();
-    } catch {
-      els.syncStatus.textContent = 'Invalid JSON file.';
-    }
-  };
-  reader.readAsText(file);
-}
+        targetPlayerId: state.peerTargetId,
+        signal: {
+          candidate: event.candidate
+        }
+      });
+    };
 
-els.startCameraBtn.onclick = startCamera;
-els.searchBtn.onclick = searchCards;
-els.joinRoomBtn.onclick = () => {
-  if (!ws || ws.readyState !== WebSocket.OPEN) connectSocket();
-  else joinRoom();
-};
-els.copyRoomBtn.onclick = async () => {
-  const roomId = els.roomIdInput.value.trim() || 'duel-room';
-  const base = publicBaseUrl || location.origin;
-  const url = new URL(base);
-  url.searchParams.set('room', roomId);
-  await navigator.clipboard.writeText(url.toString());
-  els.syncStatus.textContent = 'Room link copied.';
-};
-els.drawModeBtn.onclick = () => { drawMode = !drawMode; updateModeBadge(); };
-els.clearBoxesBtn.onclick = () => {
-  state.hotspots = state.hotspots.filter(h => h.ownerId !== playerId);
-  selectedBoxId = null;
-  pushState();
-  renderAll();
-};
-els.exportBtn.onclick = exportState;
-els.importInput.onchange = e => {
-  if (e.target.files?.[0]) importState(e.target.files[0]);
-};
-els.selfLpInput.onchange = () => { state.match.selfLp = Number(els.selfLpInput.value || 0); pushState(); };
-els.opponentLpInput.onchange = () => { state.match.opponentLp = Number(els.opponentLpInput.value || 0); pushState(); };
-els.phaseSelect.onchange = () => { state.match.phase = els.phaseSelect.value; pushState(); };
-document.querySelectorAll('[data-lp-target]').forEach(btn => {
-  btn.onclick = () => {
-    const target = btn.dataset.lpTarget;
-    const delta = Number(btn.dataset.lpDelta || 0);
-    const key = target === 'self' ? 'selfLp' : 'opponentLp';
-    state.match[key] += delta;
-    pushState();
-    renderStateFields();
-  };
-});
-els.overlay.addEventListener('pointerdown', e => {
-  if (!drawMode) return;
-  drawing = { start: pointerPosition(e), end: pointerPosition(e) };
-  drawOverlay();
-});
-els.overlay.addEventListener('pointermove', e => {
-  if (!drawing) return;
-  drawing.end = pointerPosition(e);
-  drawOverlay();
-});
-els.overlay.addEventListener('pointerup', e => {
-  if (!drawing) return;
-  drawing.end = pointerPosition(e);
-  const rect = normalizeRect(drawing.start, drawing.end);
-  drawing = null;
-  if (rect.width > 20 && rect.height > 20) createBox(rect);
-  drawOverlay();
-});
-window.addEventListener('resize', resizeCanvas);
-window.addEventListener('beforeunload', () => {
-  if (stream) stream.getTracks().forEach(t => t.stop());
-  teardownPeer();
-  if (ws) ws.close();
-});
+    pc.ontrack = (event) => {
+      const [stream] = event.streams;
+      if (!stream) return;
 
-(function initFromUrl() {
-  const params = new URLSearchParams(location.search);
-  const room = params.get('room');
-  if (room) els.roomIdInput.value = room;
-  els.playerNameInput.value = `Player-${playerId.slice(0, 4)}`;
-  updateModeBadge();
-  renderAll();
-  loadRuntimeConfig().finally(() => loadCameras().catch(() => {}));
+      state.remoteStream = stream;
+      els.remoteVideo.srcObject = stream;
+      els.remoteVideo.muted = true;
+      els.remoteVideo.play().catch(() => {});
+      els.remoteEmpty.style.display = 'none';
+      els.enableAudioBtn.disabled = false;
+      els.remoteBadge.textContent = state.peerTargetId
+        ? `Connected target: ${state.peerTargetId}`
+        : 'Peer connected';
+      resizeRemoteOverlay();
+    };
+
+    pc.onconnectionstatechange = () => {
+      const status = pc.connectionState || 'unknown';
+      if (status === 'connected') {
+        setSyncStatus('Peer connected.');
+      } else if (status === 'connecting') {
+        setSyncStatus('Connecting peer...');
+      } else if (status === 'failed') {
+        setSyncStatus('Peer connection failed.');
+      }
+    };
+
+    if (state.localStream) {
+      state.localStream.getTracks().forEach(track => {
+        pc.addTrack(track, state.localStream);
+      });
+    }
+
+    state.peerConnection = pc;
+    return pc;
+  }
+
+  async function renegotiatePeer(shouldOffer) {
+    if (!state.joined || !state.peerTargetId) return;
+    closePeerConnection();
+    await ensurePeerConnection();
+    if (shouldOffer) {
+      await makeOffer();
+    }
+  }
+
+  async function makeOffer() {
+    try {
+      const pc = await ensurePeerConnection();
+      if (!state.peerTargetId) return;
+
+      const offer = await pc.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true
+      });
+
+      await pc.setLocalDescription(offer);
+
+      sendSocket({
+        type: 'signal',
+        targetPlayerId: state.peerTargetId,
+        signal: {
+          description: pc.localDescription
+        }
+      });
+    } catch (err) {
+      console.error('Offer failed:', err);
+    }
+  }
+
+  async function handleSignalMessage(message) {
+    state.peerTargetId = message.fromPlayerId || state.peerTargetId;
+    updatePeerBadge(state.peerTargetId);
+
+    const pc = await ensurePeerConnection();
+    const signal = message.signal || {};
+
+    try {
+      if (signal.description) {
+        const description = new RTCSessionDescription(signal.description);
+        await pc.setRemoteDescription(description);
+
+        if (description.type === 'offer') {
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+
+          sendSocket({
+            type: 'signal',
+            targetPlayerId: state.peerTargetId,
+            signal: {
+              description: pc.localDescription
+            }
+          });
+        }
+      } else if (signal.candidate) {
+        await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+      }
+    } catch (err) {
+      console.error('Signal handling failed:', err);
+    }
+  }
+
+  function closePeerConnection() {
+    if (state.peerConnection) {
+      state.peerConnection.ontrack = null;
+      state.peerConnection.onicecandidate = null;
+      state.peerConnection.close();
+      state.peerConnection = null;
+    }
+  }
+
+  function syncMatchTools() {
+    const nextState = {
+      match: {
+        selfLp: Number(els.selfLpInput.value || 0),
+        opponentLp: Number(els.opponentLpInput.value || 0),
+        phase: els.phaseSelect.value
+      }
+    };
+
+    state.sharedState = {
+      ...state.sharedState,
+      ...nextState
+    };
+
+    sendSocket({
+      type: 'state-update',
+      state: state.sharedState
+    });
+
+    setSyncStatus('Match tools synced.');
+  }
+
+  function applySharedState(shared) {
+    if (!shared || !shared.match) return;
+    const match = shared.match;
+
+    els.selfLpInput.value = match.selfLp ?? 8000;
+    els.opponentLpInput.value = match.opponentLp ?? 8000;
+    els.phaseSelect.value = match.phase || 'Draw Phase';
+  }
+
+  async function onManualSearch() {
+    const query = els.cardSearchInput.value.trim();
+    if (!query) return;
+
+    setMode('Scan: Manual Search');
+    setSyncStatus('Searching cards...');
+    const results = await searchCards(query);
+    renderResults(results);
+    setSyncStatus(results.length ? 'Search complete.' : 'No matches found.');
+  }
+
+  async function searchCards(query) {
+    const cleaned = String(query || '').trim();
+    if (!cleaned) return [];
+
+    try {
+      const url = `https://db.ygoprodeck.com/api/v7/cardinfo.php?fname=${encodeURIComponent(cleaned)}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('API search failed');
+      const data = await res.json();
+      const cards = Array.isArray(data.data) ? data.data.slice(0, 8) : [];
+      return cards.map(normalizeCard);
+    } catch (err) {
+      console.warn('API search failed, using local fallback:', err);
+      return searchSampleCards(cleaned);
+    }
+  }
+
+  function searchSampleCards(query) {
+    const haystack = Array.isArray(window.SAMPLE_CARDS) ? window.SAMPLE_CARDS : [];
+    const q = query.toLowerCase();
+    return haystack
+      .filter(card => String(card.name || '').toLowerCase().includes(q))
+      .slice(0, 8)
+      .map(normalizeCard);
+  }
+
+  function normalizeCard(card) {
+    return {
+      id: card.id,
+      name: card.name || 'Unknown Card',
+      type: card.type || '',
+      desc: card.desc || '',
+      race: card.race || '',
+      attribute: card.attribute || '',
+      level: card.level || '',
+      atk: card.atk ?? '',
+      def: card.def ?? '',
+      image: card.card_images?.[0]?.image_url || card.image || '',
+      raw: card
+    };
+  }
+
+  function renderResults(results) {
+    state.latestResults = results;
+    els.searchResults.innerHTML = '';
+
+    if (!results.length) {
+      els.searchResults.className = 'search-results empty';
+      els.searchResults.textContent = 'No results found.';
+      return;
+    }
+
+    els.searchResults.className = 'search-results';
+
+    results.forEach(card => {
+      const node = els.resultTemplate.content.firstElementChild.cloneNode(true);
+      const img = node.querySelector('img');
+      const name = node.querySelector('.name');
+      const type = node.querySelector('.type');
+      const desc = node.querySelector('.desc');
+
+      img.src = card.image || '';
+      img.alt = card.name;
+      name.textContent = card.name;
+      type.textContent = buildTypeLine(card);
+      desc.textContent = truncate(card.desc, 180);
+
+      node.addEventListener('click', () => {
+        renderSelectedCard(card);
+      });
+
+      els.searchResults.appendChild(node);
+    });
+  }
+
+  function renderSelectedCard(card) {
+    els.cardDetails.innerHTML = '';
+
+    if (!card) {
+      els.cardDetails.className = 'card-details empty';
+      els.cardDetails.textContent = 'When a card is recognized, it will appear here.';
+      return;
+    }
+
+    els.cardDetails.className = 'card-details';
+
+    const wrap = document.createElement('div');
+    wrap.className = 'card-detail-wrap';
+
+    const img = document.createElement('img');
+    img.className = 'card-detail-image';
+    img.src = card.image || '';
+    img.alt = card.name;
+
+    const title = document.createElement('h3');
+    title.textContent = card.name;
+
+    const meta = document.createElement('p');
+    meta.className = 'card-meta';
+    meta.textContent = buildTypeLine(card);
+
+    const stats = document.createElement('p');
+    stats.className = 'card-stats';
+    stats.textContent = buildStatsLine(card);
+
+    const desc = document.createElement('p');
+    desc.className = 'card-description';
+    desc.textContent = card.desc || '';
+
+    wrap.appendChild(img);
+    wrap.appendChild(title);
+    wrap.appendChild(meta);
+    if (stats.textContent) wrap.appendChild(stats);
+    wrap.appendChild(desc);
+
+    els.cardDetails.appendChild(wrap);
+  }
+
+  function buildTypeLine(card) {
+    const parts = [card.type];
+    if (card.attribute) parts.push(card.attribute);
+    if (card.race) parts.push(card.race);
+    if (card.level) parts.push(`Level ${card.level}`);
+    return parts.filter(Boolean).join(' • ');
+  }
+
+  function buildStatsLine(card) {
+    const parts = [];
+    if (card.atk !== '' && card.atk !== null && card.atk !== undefined) parts.push(`ATK ${card.atk}`);
+    if (card.def !== '' && card.def !== null && card.def !== undefined) parts.push(`DEF ${card.def}`);
+    return parts.join(' • ');
+  }
+
+  function truncate(text, max) {
+    const value = String(text || '');
+    return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+  }
+
+  function resizeRemoteOverlay() {
+    if (!els.remoteOverlay || !els.remoteVideo) return;
+
+    const rect = els.remoteVideo.getBoundingClientRect();
+    const ratio = window.devicePixelRatio || 1;
+
+    els.remoteOverlay.width = Math.max(1, Math.floor(rect.width * ratio));
+    els.remoteOverlay.height = Math.max(1, Math.floor(rect.height * ratio));
+    els.remoteOverlay.style.width = `${rect.width}px`;
+    els.remoteOverlay.style.height = `${rect.height}px`;
+
+    const ctx = els.remoteOverlay.getContext('2d');
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+  }
+
+  function drawScanBox(x, y, w, h) {
+    resizeRemoteOverlay();
+    const ctx = els.remoteOverlay.getContext('2d');
+    const cssWidth = els.remoteVideo.getBoundingClientRect().width;
+    const cssHeight = els.remoteVideo.getBoundingClientRect().height;
+
+    ctx.clearRect(0, 0, cssWidth, cssHeight);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#6aa9ff';
+    ctx.fillStyle = 'rgba(106, 169, 255, 0.15)';
+    ctx.strokeRect(x, y, w, h);
+    ctx.fillRect(x, y, w, h);
+  }
+
+  async function onRemoteVideoClick(event) {
+    if (!els.remoteVideo.srcObject || !els.remoteVideo.videoWidth || !els.remoteVideo.videoHeight) {
+      return;
+    }
+
+    if (state.scanning) return;
+    state.scanning = true;
+    setMode('Scan: Processing...');
+    setSyncStatus('Scanning opponent card...');
+
+    try {
+      const rect = els.remoteVideo.getBoundingClientRect();
+      const clickX = event.clientX - rect.left;
+      const clickY = event.clientY - rect.top;
+
+      const vw = els.remoteVideo.videoWidth;
+      const vh = els.remoteVideo.videoHeight;
+
+      const scaleX = vw / rect.width;
+      const scaleY = vh / rect.height;
+
+      const videoX = clickX * scaleX;
+      const videoY = clickY * scaleY;
+
+      const cropWidth = Math.max(220, Math.floor(vw * 0.18));
+      const cropHeight = Math.max(320, Math.floor(vh * 0.36));
+
+      let sx = Math.floor(videoX - cropWidth / 2);
+      let sy = Math.floor(videoY - cropHeight / 2);
+
+      sx = Math.max(0, Math.min(vw - cropWidth, sx));
+      sy = Math.max(0, Math.min(vh - cropHeight, sy));
+
+      const previewX = sx / scaleX;
+      const previewY = sy / scaleY;
+      const previewW = cropWidth / scaleX;
+      const previewH = cropHeight / scaleY;
+
+      drawScanBox(previewX, previewY, previewW, previewH);
+
+      const captureCanvas = document.createElement('canvas');
+      captureCanvas.width = cropWidth;
+      captureCanvas.height = cropHeight;
+      const captureCtx = captureCanvas.getContext('2d');
+      captureCtx.drawImage(
+        els.remoteVideo,
+        sx,
+        sy,
+        cropWidth,
+        cropHeight,
+        0,
+        0,
+        cropWidth,
+        cropHeight
+      );
+
+      showScanPreview(captureCanvas.toDataURL('image/png'));
+
+      const ocrText = await runOcr(captureCanvas);
+      const searchText = extractLikelyCardName(ocrText);
+
+      if (!searchText) {
+        setSyncStatus('Could not read card text.');
+        renderResults([]);
+        setMode('Scan: No Text Found');
+        return;
+      }
+
+      els.cardSearchInput.value = searchText;
+      const results = await searchCards(searchText);
+
+      if (!results.length) {
+        setSyncStatus(`No matches for "${searchText}".`);
+        renderResults([]);
+        setMode('Scan: No Match');
+        return;
+      }
+
+      renderResults(results);
+      renderSelectedCard(results[0]);
+      setSyncStatus(`Scan complete: ${searchText}`);
+      setMode(`Scan: ${truncate(searchText, 24)}`);
+    } catch (err) {
+      console.error('Scan failed:', err);
+      setSyncStatus('Scan failed.');
+      setMode('Scan: Error');
+    } finally {
+      state.scanning = false;
+    }
+  }
+
+  function showScanPreview(dataUrl) {
+    els.scanPreview.className = 'scan-preview';
+    els.scanPreview.innerHTML = '';
+
+    const img = document.createElement('img');
+    img.src = dataUrl;
+    img.alt = 'Scan preview';
+
+    els.scanPreview.appendChild(img);
+  }
+
+  async function runOcr(canvas) {
+    if (!window.Tesseract) {
+      throw new Error('Tesseract not loaded');
+    }
+
+    const result = await window.Tesseract.recognize(canvas, 'eng', {
+      logger: msg => {
+        if (msg.status) {
+          setSyncStatus(`OCR: ${msg.status}`);
+        }
+      }
+    });
+
+    return result?.data?.text || '';
+  }
+
+  function extractLikelyCardName(text) {
+    if (!text) return '';
+
+    let cleaned = String(text)
+      .replace(/[\r\n]+/g, '\n')
+      .replace(/[^\w\s\-':,&./]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!cleaned) return '';
+
+    const lines = String(text)
+      .split('\n')
+      .map(line => line.replace(/[^\w\s\-':,&./]/g, ' ').replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+
+    const candidates = lines
+      .filter(line => line.length >= 3 && line.length <= 40)
+      .sort((a, b) => a.length - b.length);
+
+    if (candidates.length) {
+      cleaned = candidates[0];
+    }
+
+    cleaned = cleaned
+      .replace(/\b(ATK|DEF|SPELL|TRAP|MONSTER|EFFECT|CARD|LINK|XYZ|SYNCHRO|FUSION)\b/gi, '')
+      .replace(/\b\d+\b/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    return cleaned.slice(0, 40);
+  }
+
+  init();
 })();

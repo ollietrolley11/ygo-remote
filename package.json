@@ -1,16 +1,5 @@
-{
-  "name": "ygo-remote-deployable",
-  "version": "1.1.0",
-  "description": "Deployable remote physical Yu-Gi-Oh room app with synced state and peer video",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "engines": {
-    "node": ">=20"
-  },
-  "dependencies": {
-    "express": "^4.19.2",
-    "ws": "^8.18.0"
-  }
-}
+PORT=3000
+PUBLIC_BASE_URL=https://your-app-name.onrender.com/
+TURN_URL=turn:your-turn-host:3478?transport=udp,turn:your-turn-host:3478?transport=tcp
+TURN_USERNAME=exampleuser
+TURN_CREDENTIAL=examplepassword

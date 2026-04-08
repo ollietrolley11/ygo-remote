@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YGO Remote</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>YGO Remote</h1>
+      <p>Remote physical Yu-Gi-Oh! with live peer video, clickable card hotspots, and shared duel tools.</p>
+    </div>
+    <div class="top-actions">
+      <button id="startCameraBtn">Start Camera</button>
+      <button id="drawModeBtn">Draw Hotspot</button>
+      <button id="clearBoxesBtn" class="secondary">Clear My Hotspots</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="main-column">
+      <section class="panel room-panel">
+        <div class="room-grid">
+          <label>
+            Room ID
+            <input id="roomIdInput" type="text" placeholder="duel-room" />
+          </label>
+          <label>
+            Display name
+            <input id="playerNameInput" type="text" placeholder="Player 1" />
+          </label>
+          <label>
+            Side
+            <select id="sideSelect">
+              <option value="self">Self</option>
+              <option value="opponent">Opponent</option>
+            </select>
+          </label>
+          <div class="button-stack">
+            <button id="joinRoomBtn">Join Room</button>
+            <button id="copyRoomBtn" class="secondary">Copy Link</button>
+          </div>
+        </div>
+        <div class="status-row">
+          <span id="roomStatus">Not connected.</span>
+          <span id="syncStatus">Idle.</span>
+          <span id="modeBadge">Mode: View</span>
+        </div>
+      </section>
+
+      <section class="video-grid">
+        <article class="panel field-panel">
+          <div class="field-header">
+            <div>
+              <h2>Your Field</h2>
+              <p>Start your camera, draw a hotspot over a face-up card, then assign it from the database.</p>
+            </div>
+            <div class="badge" id="localBadge">Local side: Self</div>
+          </div>
+
+          <div class="video-shell">
+            <video id="video" autoplay playsinline muted></video>
+            <canvas id="overlay"></canvas>
+            <div class="video-empty" id="videoEmpty">Start camera to map your field.</div>
+          </div>
+
+          <div class="controls-grid">
+            <label>
+              Camera
+              <select id="cameraSelect"></select>
+            </label>
+            <label>
+              Hotspot label
+              <input id="hotspotLabel" type="text" placeholder="Example: Opponent boss monster" />
+            </label>
+            <label>
+              Search card
+              <input id="cardSearchInput" type="text" placeholder="Blue-Eyes White Dragon" />
+            </label>
+            <button id="searchBtn">Search</button>
+          </div>
+        </article>
+
+        <article class="panel remote-panel">
+          <div class="field-header">
+            <div>
+              <h2>Opponent View</h2>
+              <p>Peer video from the other player in the room.</p>
+            </div>
+            <div class="badge" id="remoteBadge">Waiting for peer</div>
+          </div>
+          <div class="video-shell remote-shell">
+            <video id="remoteVideo" autoplay playsinline></video>
+            <div class="video-empty" id="remoteEmpty">Join the same room on another device to connect live video.</div>
+          </div>
+        </article>
+      </section>
+    </section>
+
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>Match Tools</h2>
+        <div class="lp-grid">
+          <label>
+            Your LP
+            <input id="selfLpInput" type="number" value="8000" />
+          </label>
+          <label>
+            Opponent LP
+            <input id="opponentLpInput" type="number" value="8000" />
+          </label>
+        </div>
+        <div class="lp-actions duo">
+          <button data-lp-target="self" data-lp-delta="-500" class="secondary small-btn">Your -500</button>
+          <button data-lp-target="self" data-lp-delta="500" class="secondary small-btn">Your +500</button>
+          <button data-lp-target="opponent" data-lp-delta="-500" class="secondary small-btn">Opp -500</button>
+          <button data-lp-target="opponent" data-lp-delta="500" class="secondary small-btn">Opp +500</button>
+        </div>
+        <label>
+          Phase
+          <select id="phaseSelect">
+            <option>Draw Phase</option>
+            <option>Standby Phase</option>
+            <option>Main Phase 1</option>
+            <option>Battle Phase</option>
+            <option>Main Phase 2</option>
+            <option>End Phase</option>
+          </select>
+        </label>
+        <div class="roster" id="roster">Players: none</div>
+      </section>
+
+      <section class="panel">
+        <h2>Search Results</h2>
+        <div id="searchResults" class="search-results empty">Select a hotspot, then search a card name to assign it.</div>
+      </section>
+
+      <section class="panel">
+        <h2>Selected Card</h2>
+        <div id="cardDetails" class="card-details empty">Click a hotspot to inspect its card details.</div>
+      </section>
+
+      <section class="panel">
+        <h2>Hotspots</h2>
+        <div id="boxList" class="box-list empty">No hotspots yet.</div>
+        <div class="panel-actions">
+          <button id="exportBtn" class="secondary">Export Room State</button>
+          <label class="import-label secondary">
+            Import Room State
+            <input id="importInput" type="file" accept="application/json" hidden />
+          </label>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <template id="resultTemplate">
+    <button class="result-card">
+      <img alt="Card image" />
+      <div>
+        <strong class="name"></strong>
+        <p class="type"></p>
+        <p class="desc"></p>
+      </div>
+    </button>
+  </template>
+
+  <script src="sample-cards.js"></script>
+  <script src="client.js"></script>
+</body>
+</html>

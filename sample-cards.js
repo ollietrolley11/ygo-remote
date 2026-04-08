@@ -185,3 +185,11 @@ video, canvas {
 @media (max-width: 860px) {
   .room-grid, .controls-grid, .lp-grid, .video-grid, .sidebar { grid-template-columns: 1fr; }
 }
+
+
+.remote-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}

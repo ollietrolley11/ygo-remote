@@ -89,7 +89,10 @@
               <h2>Opponent View</h2>
               <p>Peer video from the other player in the room.</p>
             </div>
-            <div class="badge" id="remoteBadge">Waiting for peer</div>
+            <div class="remote-actions">
+              <div class="badge" id="remoteBadge">Waiting for peer</div>
+              <button id="enableAudioBtn" class="secondary small-btn" disabled>Enable Opponent Audio</button>
+            </div>
           </div>
           <div class="video-shell remote-shell">
             <video id="remoteVideo" autoplay playsinline></video>

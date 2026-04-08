@@ -1,195 +1,167 @@
-:root {
-  color-scheme: dark;
-  --bg: #0f172a;
-  --panel: #111827;
-  --panel-2: #1f2937;
-  --line: #334155;
-  --text: #e5e7eb;
-  --muted: #94a3b8;
-  --accent: #60a5fa;
-  --accent-2: #93c5fd;
-  --danger: #ef4444;
-}
-* { box-sizing: border-box; }
-body {
-  margin: 0;
-  font-family: Arial, Helvetica, sans-serif;
-  background: linear-gradient(180deg, #020617, #0f172a 35%);
-  color: var(--text);
-}
-button, input, select {
-  font: inherit;
-}
-button {
-  background: var(--accent);
-  color: #08111f;
-  border: none;
-  border-radius: 10px;
-  padding: 10px 14px;
-  cursor: pointer;
-  font-weight: 700;
-}
-button.secondary, .import-label.secondary {
-  background: #1e293b;
-  color: var(--text);
-  border: 1px solid var(--line);
-}
-button.danger { background: var(--danger); color: white; }
-input, select {
-  width: 100%;
-  background: #0b1220;
-  color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 10px 12px;
-}
-label { display: grid; gap: 8px; color: var(--muted); font-size: 14px; }
-.topbar {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 20px;
-  border-bottom: 1px solid rgba(148,163,184,.15);
-}
-.topbar h1 { margin: 0 0 6px; }
-.topbar p { margin: 0; color: var(--muted); max-width: 760px; }
-.top-actions { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }
-.layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 380px;
-  gap: 16px;
-  padding: 16px;
-}
-.main-column { display: grid; gap: 16px; }
-.panel {
-  background: rgba(17,24,39,.94);
-  border: 1px solid rgba(148,163,184,.16);
-  border-radius: 16px;
-  padding: 16px;
-  box-shadow: 0 10px 30px rgba(0,0,0,.25);
-}
-.room-grid, .controls-grid, .lp-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-}
-.controls-grid { grid-template-columns: 1.2fr 1fr 1fr auto; align-items: end; }
-.button-stack { display: grid; gap: 10px; align-self: end; }
-.status-row, .field-header, .panel-actions, .lp-actions {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-}
-.status-row { margin-top: 14px; color: var(--muted); font-size: 14px; }
-.badge {
-  border: 1px solid var(--line);
-  background: #0b1220;
-  color: var(--accent-2);
-  border-radius: 999px;
-  padding: 8px 12px;
-  font-size: 13px;
-}
-.video-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
-}
-.video-shell, .remote-board {
-  position: relative;
-  min-height: 420px;
-  background: #020617;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  overflow: hidden;
-}
-video, canvas {
-  width: 100%;
-  height: 100%;
-  display: block;
-  object-fit: cover;
-}
-#overlay {
-  position: absolute;
-  inset: 0;
-  cursor: crosshair;
-}
-.video-empty {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  text-align: center;
-  padding: 24px;
-  color: var(--muted);
-  background: linear-gradient(180deg, rgba(2,6,23,.85), rgba(2,6,23,.65));
-}
-.sidebar { display: grid; gap: 16px; align-self: start; }
-.search-results, .box-list, .card-details {
-  display: grid;
-  gap: 10px;
-}
-.search-results.empty, .box-list.empty, .card-details.empty {
-  color: var(--muted);
-}
-.result-card, .box-item {
-  width: 100%;
-  text-align: left;
-  display: grid;
-  grid-template-columns: 72px 1fr;
-  gap: 10px;
-  padding: 10px;
-  background: #0b1220;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  color: var(--text);
-}
-.box-item { grid-template-columns: 1fr; }
-.result-card img, .details-card img {
-  width: 72px;
-  height: 105px;
-  object-fit: cover;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: #020617;
-}
-.result-card p, .box-item p, .details-card p, .roster { margin: 4px 0 0; color: var(--muted); }
-.details-card {
-  display: grid;
-  grid-template-columns: 92px 1fr;
-  gap: 12px;
-}
-.details-card img { width: 92px; height: 132px; }
-.box-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.box-actions { display: flex; gap: 8px; }
-.small-btn { padding: 8px 10px; }
-.duo { justify-content: flex-start; }
-.import-label {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 10px;
-  padding: 10px 14px;
-  cursor: pointer;
-}
-@media (max-width: 1180px) {
-  .layout { grid-template-columns: 1fr; }
-  .sidebar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-@media (max-width: 860px) {
-  .room-grid, .controls-grid, .lp-grid, .video-grid, .sidebar { grid-template-columns: 1fr; }
-}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YGO Remote Scan</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>YGO Remote Scan</h1>
+      <p>Remote physical Yu-Gi-Oh! with live peer video, voice, duel tools, and click-to-scan card lookup on the opponent field.</p>
+    </div>
+    <div class="top-actions">
+      <button id="startCameraBtn">Start Camera + Mic</button>
+      <button id="enableAudioBtn" class="secondary" disabled>Enable Opponent Audio</button>
+    </div>
+  </header>
 
+  <main class="layout">
+    <section class="main-column">
+      <section class="panel">
+        <div class="room-grid">
+          <label>
+            Room ID
+            <input id="roomIdInput" type="text" placeholder="duel-room" />
+          </label>
+          <label>
+            Display name
+            <input id="playerNameInput" type="text" placeholder="Player 1" />
+          </label>
+          <label>
+            Side
+            <select id="sideSelect">
+              <option value="self">Self</option>
+              <option value="opponent">Opponent</option>
+            </select>
+          </label>
+          <div class="button-stack">
+            <button id="joinRoomBtn">Join Room</button>
+            <button id="copyRoomBtn" class="secondary">Copy Link</button>
+          </div>
+        </div>
+        <div class="status-row">
+          <span id="roomStatus">Not connected.</span>
+          <span id="syncStatus">Idle.</span>
+          <span id="modeBadge">Scan: Ready</span>
+        </div>
+      </section>
 
-.remote-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
+      <section class="video-grid">
+        <article class="panel field-panel">
+          <div class="field-header">
+            <div>
+              <h2>Your Field</h2>
+              <p>Your local webcam view. Position your mat clearly and keep cards well lit.</p>
+            </div>
+            <div class="badge" id="localBadge">Local side: Self</div>
+          </div>
+
+          <div class="video-shell">
+            <video id="video" autoplay playsinline muted></video>
+            <div class="video-empty" id="videoEmpty">Start camera to show your field.</div>
+          </div>
+
+          <div class="controls-grid compact-grid">
+            <label>
+              Camera
+              <select id="cameraSelect"></select>
+            </label>
+            <label>
+              Search card manually
+              <input id="cardSearchInput" type="text" placeholder="Blue-Eyes White Dragon" />
+            </label>
+            <button id="searchBtn">Search</button>
+          </div>
+        </article>
+
+        <article class="panel remote-panel">
+          <div class="field-header">
+            <div>
+              <h2>Opponent View</h2>
+              <p>Click directly on a face-up card on the opponent feed to scan and identify it.</p>
+            </div>
+            <div class="badge" id="remoteBadge">Waiting for peer</div>
+          </div>
+
+          <div class="video-shell remote-shell" id="remoteShell">
+            <video id="remoteVideo" autoplay playsinline></video>
+            <canvas id="remoteOverlay"></canvas>
+            <div class="video-empty" id="remoteEmpty">Join the same room on another device to connect live video.</div>
+          </div>
+          <p class="helper-text">Tip: click near the center of the card you want. The app will try to find the card frame, OCR the name, and pull matching card data.</p>
+        </article>
+      </section>
+    </section>
+
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>Match Tools</h2>
+        <div class="lp-grid">
+          <label>
+            Your LP
+            <input id="selfLpInput" type="number" value="8000" />
+          </label>
+          <label>
+            Opponent LP
+            <input id="opponentLpInput" type="number" value="8000" />
+          </label>
+        </div>
+        <div class="lp-actions duo">
+          <button data-lp-target="self" data-lp-delta="-500" class="secondary small-btn">Your -500</button>
+          <button data-lp-target="self" data-lp-delta="500" class="secondary small-btn">Your +500</button>
+          <button data-lp-target="opponent" data-lp-delta="-500" class="secondary small-btn">Opp -500</button>
+          <button data-lp-target="opponent" data-lp-delta="500" class="secondary small-btn">Opp +500</button>
+        </div>
+        <label>
+          Phase
+          <select id="phaseSelect">
+            <option>Draw Phase</option>
+            <option>Standby Phase</option>
+            <option>Main Phase 1</option>
+            <option>Battle Phase</option>
+            <option>Main Phase 2</option>
+            <option>End Phase</option>
+          </select>
+        </label>
+        <div class="roster" id="roster">Players: none</div>
+      </section>
+
+      <section class="panel">
+        <h2>Scan Preview</h2>
+        <div id="scanPreview" class="scan-preview empty">
+          Click the opponent video to scan a card.
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Recognition Results</h2>
+        <div id="searchResults" class="search-results empty">No scan yet. You can also search manually from the field panel.</div>
+      </section>
+
+      <section class="panel">
+        <h2>Selected Card</h2>
+        <div id="cardDetails" class="card-details empty">When a card is recognized, it will appear here.</div>
+      </section>
+    </aside>
+  </main>
+
+  <template id="resultTemplate">
+    <button class="result-card">
+      <img alt="Card image" />
+      <div>
+        <strong class="name"></strong>
+        <p class="type"></p>
+        <p class="desc"></p>
+      </div>
+    </button>
+  </template>
+
+  <script src="sample-cards.js"></script>
+  <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script src="client.js"></script>
+</body>
+</html>

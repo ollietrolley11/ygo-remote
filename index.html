@@ -1,0 +1,953 @@
+const els = {
+  video: document.getElementById('video'),
+  remoteVideo: document.getElementById('remoteVideo'),
+  remoteOverlay: document.getElementById('remoteOverlay'),
+  videoEmpty: document.getElementById('videoEmpty'),
+  remoteEmpty: document.getElementById('remoteEmpty'),
+  remoteShell: document.getElementById('remoteShell'),
+  startCameraBtn: document.getElementById('startCameraBtn'),
+  enableAudioBtn: document.getElementById('enableAudioBtn'),
+  cameraSelect: document.getElementById('cameraSelect'),
+  roomIdInput: document.getElementById('roomIdInput'),
+  playerNameInput: document.getElementById('playerNameInput'),
+  sideSelect: document.getElementById('sideSelect'),
+  joinRoomBtn: document.getElementById('joinRoomBtn'),
+  copyRoomBtn: document.getElementById('copyRoomBtn'),
+  roomStatus: document.getElementById('roomStatus'),
+  syncStatus: document.getElementById('syncStatus'),
+  modeBadge: document.getElementById('modeBadge'),
+  localBadge: document.getElementById('localBadge'),
+  remoteBadge: document.getElementById('remoteBadge'),
+  selfLpInput: document.getElementById('selfLpInput'),
+  opponentLpInput: document.getElementById('opponentLpInput'),
+  phaseSelect: document.getElementById('phaseSelect'),
+  roster: document.getElementById('roster'),
+  cardSearchInput: document.getElementById('cardSearchInput'),
+  searchBtn: document.getElementById('searchBtn'),
+  searchResults: document.getElementById('searchResults'),
+  cardDetails: document.getElementById('cardDetails'),
+  scanPreview: document.getElementById('scanPreview'),
+  resultTemplate: document.getElementById('resultTemplate')
+};
+
+const overlayCtx = els.remoteOverlay.getContext('2d');
+const playerId = crypto.randomUUID();
+
+let ws = null;
+let stream = null;
+let peerConnection = null;
+let currentPeerId = null;
+let publicBaseUrl = '';
+let rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+let selectedQuad = null;
+let selectedQuadTimer = null;
+let latestScan = null;
+let cvReady = false;
+let cvWaiters = [];
+let ocrInFlight = false;
+
+const state = {
+  roomId: '',
+  me: { name: 'Player', side: 'self' },
+  roster: [],
+  hotspots: [],
+  match: { selfLp: 8000, opponentLp: 8000, phase: 'Draw Phase' }
+};
+
+function setSyncStatus(text) {
+  els.syncStatus.textContent = text;
+}
+
+function setModeBadge(text) {
+  els.modeBadge.textContent = text;
+}
+
+function capitalize(v) {
+  return v ? v.charAt(0).toUpperCase() + v.slice(1) : '';
+}
+
+function resizeRemoteOverlay() {
+  const rect = els.remoteShell.getBoundingClientRect();
+  els.remoteOverlay.width = rect.width;
+  els.remoteOverlay.height = rect.height;
+  drawRemoteOverlay();
+}
+
+function drawRemoteOverlay() {
+  overlayCtx.clearRect(0, 0, els.remoteOverlay.width, els.remoteOverlay.height);
+  if (!selectedQuad || !selectedQuad.displayPoints) return;
+  overlayCtx.strokeStyle = 'rgba(255,255,255,0.95)';
+  overlayCtx.lineWidth = 3;
+  overlayCtx.fillStyle = 'rgba(96,165,250,0.18)';
+  overlayCtx.beginPath();
+  selectedQuad.displayPoints.forEach((pt, index) => {
+    if (index === 0) overlayCtx.moveTo(pt.x, pt.y);
+    else overlayCtx.lineTo(pt.x, pt.y);
+  });
+  overlayCtx.closePath();
+  overlayCtx.fill();
+  overlayCtx.stroke();
+}
+
+function flashSelectedQuad(displayPoints) {
+  selectedQuad = { displayPoints };
+  drawRemoteOverlay();
+  if (selectedQuadTimer) clearTimeout(selectedQuadTimer);
+  selectedQuadTimer = setTimeout(() => {
+    selectedQuad = null;
+    drawRemoteOverlay();
+  }, 3500);
+}
+
+function renderRoster() {
+  if (!state.roster.length) {
+    els.roster.textContent = 'Players: none';
+    return;
+  }
+  els.roster.textContent = `Players: ${state.roster.map(p => `${p.name} (${capitalize(p.side)})`).join(', ')}`;
+}
+
+function renderRemoteStatus() {
+  const peer = state.roster.find(p => p.playerId !== playerId);
+  els.remoteBadge.textContent = peer ? `Opponent: ${peer.name}` : 'Waiting for peer';
+}
+
+function renderStateFields() {
+  els.selfLpInput.value = state.match.selfLp;
+  els.opponentLpInput.value = state.match.opponentLp;
+  els.phaseSelect.value = state.match.phase;
+  els.localBadge.textContent = `Local side: ${capitalize(state.me.side)}`;
+}
+
+function renderAll() {
+  renderRoster();
+  renderRemoteStatus();
+  renderStateFields();
+  drawRemoteOverlay();
+}
+
+async function loadRuntimeConfig() {
+  try {
+    const response = await fetch('/config');
+    if (!response.ok) return;
+    const config = await response.json();
+    if (Array.isArray(config.iceServers) && config.iceServers.length) {
+      rtcConfig = { iceServers: config.iceServers };
+    }
+    publicBaseUrl = config.publicBaseUrl || '';
+    if (config.hasTurn) setSyncStatus('TURN relay configured.');
+  } catch {
+    // ignore
+  }
+}
+
+async function loadCameras() {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const cams = devices.filter(d => d.kind === 'videoinput');
+  els.cameraSelect.innerHTML = '';
+  cams.forEach((cam, index) => {
+    const opt = document.createElement('option');
+    opt.value = cam.deviceId;
+    opt.textContent = cam.label || `Camera ${index + 1}`;
+    els.cameraSelect.appendChild(opt);
+  });
+}
+
+async function startCamera() {
+  try {
+    if (stream) stream.getTracks().forEach(track => track.stop());
+    const deviceId = els.cameraSelect.value;
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: 'environment' },
+      audio: true
+    });
+    els.video.srcObject = stream;
+    await els.video.play();
+    els.videoEmpty.style.display = 'none';
+    await loadCameras();
+    resizeRemoteOverlay();
+    setSyncStatus('Camera + mic live.');
+    if (peerConnection) {
+      teardownPeer();
+      maybeConnectToPeer();
+    }
+  } catch (error) {
+    setSyncStatus(`Camera error: ${error.message || 'permission denied'}`);
+  }
+}
+
+function connectSocket() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  els.roomStatus.textContent = 'Connecting...';
+  setSyncStatus('Opening room socket...');
+  ws = new WebSocket(`${protocol}//${location.host}`);
+  ws.onopen = () => {
+    setSyncStatus('Socket connected.');
+    joinRoom();
+  };
+  ws.onerror = () => {
+    els.roomStatus.textContent = 'Connection failed.';
+    setSyncStatus('WebSocket failed to open. Check the deployment logs.');
+  };
+  ws.onclose = () => {
+    els.roomStatus.textContent = 'Not connected.';
+    setSyncStatus('Socket disconnected.');
+    teardownPeer();
+  };
+  ws.onmessage = async event => {
+    const msg = JSON.parse(event.data);
+    if (msg.type === 'room-joined') {
+      state.roomId = msg.roomId;
+      state.roster = msg.roster || [];
+      if (msg.sharedState) {
+        state.hotspots = msg.sharedState.hotspots || [];
+        state.match = msg.sharedState.match || state.match;
+      }
+      els.roomStatus.textContent = `Connected to room: ${msg.roomId}`;
+      renderAll();
+      maybeConnectToPeer();
+      return;
+    }
+    if (msg.type === 'room-roster') {
+      state.roster = msg.roster || [];
+      renderAll();
+      maybeConnectToPeer();
+      return;
+    }
+    if (msg.type === 'state-update') {
+      state.hotspots = msg.state.hotspots || [];
+      state.match = msg.state.match || state.match;
+      renderAll();
+      setSyncStatus('Room synced.');
+      return;
+    }
+    if (msg.type === 'peer-left') {
+      if (msg.playerId === currentPeerId) teardownPeer();
+      return;
+    }
+    if (msg.type === 'signal') {
+      await handleSignal(msg.fromPlayerId, msg.signal);
+      return;
+    }
+    if (msg.type === 'error') {
+      setSyncStatus(msg.message);
+    }
+  };
+}
+
+function joinRoom() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    els.roomStatus.textContent = 'Not connected.';
+    setSyncStatus('Socket is not open yet.');
+    return;
+  }
+  const roomId = els.roomIdInput.value.trim() || 'duel-room';
+  state.me.name = els.playerNameInput.value.trim() || 'Player';
+  state.me.side = els.sideSelect.value;
+  els.roomStatus.textContent = `Joining room: ${roomId}...`;
+  ws.send(JSON.stringify({
+    type: 'join-room',
+    roomId,
+    playerId,
+    name: state.me.name,
+    side: state.me.side
+  }));
+}
+
+function pushState() {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !state.roomId) return;
+  ws.send(JSON.stringify({
+    type: 'state-update',
+    state: {
+      hotspots: state.hotspots,
+      match: state.match
+    }
+  }));
+}
+
+function getPeerTarget() {
+  return state.roster.find(p => p.playerId !== playerId) || null;
+}
+
+function maybeConnectToPeer() {
+  const peer = getPeerTarget();
+  if (!peer) return;
+  if (currentPeerId === peer.playerId && peerConnection) return;
+  const shouldInitiate = playerId < peer.playerId;
+  setupPeer(peer.playerId, shouldInitiate);
+}
+
+function setupPeer(targetPlayerId, initiator) {
+  teardownPeer(false);
+  currentPeerId = targetPlayerId;
+  peerConnection = new RTCPeerConnection(rtcConfig);
+
+  if (stream) {
+    stream.getTracks().forEach(track => peerConnection.addTrack(track, stream));
+  }
+
+  peerConnection.onicecandidate = event => {
+    if (!event.candidate || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({
+      type: 'signal',
+      targetPlayerId,
+      signal: { type: 'candidate', candidate: event.candidate }
+    }));
+  };
+
+  peerConnection.ontrack = event => {
+    const remoteStream = event.streams && event.streams[0] ? event.streams[0] : new MediaStream([event.track]);
+    els.remoteVideo.srcObject = remoteStream;
+    els.remoteVideo.autoplay = true;
+    els.remoteVideo.playsInline = true;
+    els.remoteVideo.muted = true;
+    els.remoteVideo.play().then(() => {
+      setSyncStatus('Remote stream connected. Click Enable Opponent Audio to hear them.');
+    }).catch(() => {
+      setSyncStatus('Remote stream attached. Click Enable Opponent Audio if you cannot hear them.');
+    });
+    els.enableAudioBtn.disabled = false;
+    els.remoteEmpty.style.display = 'none';
+    resizeRemoteOverlay();
+  };
+
+  peerConnection.onconnectionstatechange = () => {
+    const status = peerConnection?.connectionState || 'connecting';
+    setSyncStatus(`Peer: ${status}`);
+    if (['failed', 'disconnected', 'closed'].includes(status)) {
+      els.remoteEmpty.style.display = 'grid';
+    }
+  };
+
+  if (initiator) {
+    createOffer(targetPlayerId).catch(() => setSyncStatus('Could not start peer offer.'));
+  }
+}
+
+async function createOffer(targetPlayerId) {
+  if (!peerConnection) return;
+  const offer = await peerConnection.createOffer();
+  await peerConnection.setLocalDescription(offer);
+  ws.send(JSON.stringify({
+    type: 'signal',
+    targetPlayerId,
+    signal: { type: 'offer', sdp: offer }
+  }));
+}
+
+async function handleSignal(fromPlayerId, signal) {
+  if (!peerConnection || currentPeerId !== fromPlayerId) setupPeer(fromPlayerId, false);
+  if (signal.type === 'offer') {
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+    const answer = await peerConnection.createAnswer();
+    await peerConnection.setLocalDescription(answer);
+    ws.send(JSON.stringify({
+      type: 'signal',
+      targetPlayerId: fromPlayerId,
+      signal: { type: 'answer', sdp: answer }
+    }));
+    return;
+  }
+  if (signal.type === 'answer') {
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+    return;
+  }
+  if (signal.type === 'candidate') {
+    try {
+      await peerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
+    } catch {
+      // ignore out-of-order candidates
+    }
+  }
+}
+
+function teardownPeer(clearRemote = true) {
+  currentPeerId = null;
+  if (peerConnection) {
+    peerConnection.ontrack = null;
+    peerConnection.onicecandidate = null;
+    peerConnection.close();
+    peerConnection = null;
+  }
+  if (clearRemote) {
+    els.remoteVideo.srcObject = null;
+    els.remoteVideo.muted = true;
+    els.remoteEmpty.style.display = 'grid';
+  }
+  els.enableAudioBtn.disabled = true;
+  els.enableAudioBtn.textContent = 'Enable Opponent Audio';
+}
+
+function showCardDetails(card, meta = {}) {
+  els.cardDetails.className = 'card-details';
+  els.cardDetails.innerHTML = `
+    <div class="details-card">
+      <img src="${card.image_url || ''}" alt="${card.name}" />
+      <div>
+        <h3>${card.name}</h3>
+        <p>${[card.type, card.race, card.attribute].filter(Boolean).join(' · ')}</p>
+        ${card.level ? `<p>Level/Rank/Link: ${card.level}</p>` : ''}
+        ${(card.atk !== undefined || card.def !== undefined) ? `<p>ATK ${card.atk ?? '?'} / DEF ${card.def ?? '?'}</p>` : ''}
+        ${meta.ocrText ? `<p>OCR guess: ${meta.ocrText}</p>` : ''}
+        ${meta.note ? `<p>${meta.note}</p>` : ''}
+        <p>${card.desc || 'No description available.'}</p>
+      </div>
+    </div>
+  `;
+}
+
+function showScanPreview(preview) {
+  if (!preview) {
+    els.scanPreview.className = 'scan-preview empty';
+    els.scanPreview.textContent = 'Click the opponent video to scan a card.';
+    return;
+  }
+  els.scanPreview.className = 'scan-preview';
+  els.scanPreview.innerHTML = `
+    <div class="scan-card">
+      <img src="${preview.imageUrl}" alt="Scanned card preview" />
+      <div>
+        <strong>${preview.title || 'Scanned card crop'}</strong>
+        ${preview.ocrText ? `<p>OCR: ${preview.ocrText}</p>` : '<p>OCR could not confidently read the name.</p>'}
+        ${preview.note ? `<p>${preview.note}</p>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+function renderSearchResults(cards, term, heading = '') {
+  if (!cards.length) {
+    els.searchResults.className = 'search-results empty';
+    els.searchResults.textContent = heading || `No card results for "${term}".`;
+    return;
+  }
+  els.searchResults.className = 'search-results';
+  els.searchResults.innerHTML = heading ? `<p class="helper-text">${heading}</p>` : '';
+  cards.forEach(card => {
+    const node = els.resultTemplate.content.firstElementChild.cloneNode(true);
+    node.querySelector('img').src = card.image_url || '';
+    node.querySelector('.name').textContent = card.name;
+    node.querySelector('.type').textContent = [card.type, card.attribute, card.race].filter(Boolean).join(' · ');
+    node.querySelector('.desc').textContent = (card.desc || '').slice(0, 120);
+    node.onclick = () => showCardDetails(card, latestScan ? { ocrText: latestScan.ocrText, note: latestScan.note } : {});
+    els.searchResults.appendChild(node);
+  });
+}
+
+function mapApiCard(card) {
+  return {
+    name: card.name,
+    type: card.type,
+    race: card.race,
+    attribute: card.attribute,
+    level: card.level || card.linkval || card.rank,
+    atk: card.atk,
+    def: card.def,
+    desc: card.desc,
+    image_url: card.card_images?.[0]?.image_url || ''
+  };
+}
+
+async function searchCards(term = els.cardSearchInput.value.trim()) {
+  if (!term) return [];
+  let cards = [];
+  try {
+    const response = await fetch(`https://db.ygoprodeck.com/api/v7/cardinfo.php?fname=${encodeURIComponent(term)}`);
+    if (!response.ok) throw new Error('API failed');
+    const data = await response.json();
+    cards = (data.data || []).slice(0, 8).map(mapApiCard);
+  } catch {
+    cards = (window.SAMPLE_CARDS || []).filter(card => card.name.toLowerCase().includes(term.toLowerCase())).slice(0, 8);
+  }
+  renderSearchResults(cards, term, `Manual search for “${term}”.`);
+  setSyncStatus(`Found ${cards.length} result(s).`);
+  return cards;
+}
+
+function normalizeText(text) {
+  return (text || '')
+    .replace(/[\n\r]+/g, ' ')
+    .replace(/[^A-Za-z0-9'&:.,\-\/ ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function scoredTermsFromOcr(rawText) {
+  const normalized = normalizeText(rawText);
+  if (!normalized) return [];
+  const terms = new Set();
+  terms.add(normalized);
+  const words = normalized.split(' ').filter(Boolean);
+  if (words.length > 1) {
+    terms.add(words.slice(0, Math.min(4, words.length)).join(' '));
+    terms.add(words.slice(0, Math.min(3, words.length)).join(' '));
+  }
+  if (words.length >= 2) {
+    for (let size = Math.min(4, words.length); size >= 2; size -= 1) {
+      for (let start = 0; start <= words.length - size; start += 1) {
+        terms.add(words.slice(start, start + size).join(' '));
+      }
+    }
+  }
+  return Array.from(terms).filter(term => term.length >= 4).slice(0, 8);
+}
+
+async function lookupCandidatesFromOcr(ocrText) {
+  const terms = scoredTermsFromOcr(ocrText);
+  if (!terms.length) return [];
+
+  for (const term of terms) {
+    try {
+      const response = await fetch(`https://db.ygoprodeck.com/api/v7/cardinfo.php?fname=${encodeURIComponent(term)}`);
+      if (!response.ok) continue;
+      const data = await response.json();
+      const cards = (data.data || []).map(mapApiCard);
+      if (!cards.length) continue;
+
+      const exact = cards.find(card => normalizeText(card.name).toLowerCase() === normalizeText(term).toLowerCase());
+      if (exact) return [exact, ...cards.filter(card => card.name !== exact.name)].slice(0, 6);
+      return cards.slice(0, 6);
+    } catch {
+      // continue to next term
+    }
+  }
+
+  const loweredTerms = terms.map(term => term.toLowerCase());
+  return (window.SAMPLE_CARDS || [])
+    .filter(card => loweredTerms.some(term => card.name.toLowerCase().includes(term)))
+    .slice(0, 6);
+}
+
+function waitForCv(maxMs = 10000) {
+  if (cvReady) return Promise.resolve(true);
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve(false), maxMs);
+    cvWaiters.push(value => {
+      clearTimeout(timer);
+      resolve(value);
+    });
+  });
+}
+
+function notifyCvReady(value) {
+  cvReady = value;
+  cvWaiters.forEach(resolve => resolve(value));
+  cvWaiters = [];
+}
+
+function initializeCvWatch() {
+  let elapsed = 0;
+  const interval = setInterval(() => {
+    if (window.cv && typeof window.cv.Mat === 'function') {
+      clearInterval(interval);
+      notifyCvReady(true);
+      return;
+    }
+    elapsed += 200;
+    if (elapsed >= 12000) {
+      clearInterval(interval);
+      notifyCvReady(false);
+    }
+  }, 200);
+}
+
+function ensureTesseract() {
+  return Boolean(window.Tesseract && typeof window.Tesseract.recognize === 'function');
+}
+
+function getVideoMapping(videoEl, overlayEl) {
+  const vw = videoEl.videoWidth;
+  const vh = videoEl.videoHeight;
+  const dw = overlayEl.clientWidth;
+  const dh = overlayEl.clientHeight;
+  const scale = Math.max(dw / vw, dh / vh);
+  const renderWidth = vw * scale;
+  const renderHeight = vh * scale;
+  const offsetX = (dw - renderWidth) / 2;
+  const offsetY = (dh - renderHeight) / 2;
+  return { vw, vh, dw, dh, scale, renderWidth, renderHeight, offsetX, offsetY };
+}
+
+function displayPointToVideoPoint(event, videoEl, overlayEl) {
+  const rect = overlayEl.getBoundingClientRect();
+  const mapping = getVideoMapping(videoEl, overlayEl);
+  const displayX = event.clientX - rect.left;
+  const displayY = event.clientY - rect.top;
+  const videoX = Math.min(mapping.vw, Math.max(0, (displayX - mapping.offsetX) / mapping.scale));
+  const videoY = Math.min(mapping.vh, Math.max(0, (displayY - mapping.offsetY) / mapping.scale));
+  return { displayX, displayY, videoX, videoY, mapping };
+}
+
+function videoPointToDisplayPoint(videoPoint, mapping) {
+  return {
+    x: videoPoint.x * mapping.scale + mapping.offsetX,
+    y: videoPoint.y * mapping.scale + mapping.offsetY
+  };
+}
+
+function captureVideoFrame(videoEl) {
+  const canvas = document.createElement('canvas');
+  canvas.width = videoEl.videoWidth;
+  canvas.height = videoEl.videoHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+function fallbackDetection(frameCanvas, clickX, clickY) {
+  const aspect = 59 / 86;
+  const frameWidth = frameCanvas.width;
+  const frameHeight = frameCanvas.height;
+  const cardHeight = Math.max(180, Math.min(frameHeight * 0.42, 430));
+  const cardWidth = cardHeight * aspect;
+  const x = Math.max(0, Math.min(frameWidth - cardWidth, clickX - cardWidth / 2));
+  const y = Math.max(0, Math.min(frameHeight - cardHeight, clickY - cardHeight / 2));
+  const rect = { x, y, width: cardWidth, height: cardHeight };
+  const quad = [
+    { x, y },
+    { x: x + cardWidth, y },
+    { x: x + cardWidth, y: y + cardHeight },
+    { x, y: y + cardHeight }
+  ];
+  const croppedCanvas = cropRectCanvas(frameCanvas, rect);
+  return { quad, croppedCanvas, note: 'Used fallback crop because automatic contour detection was unavailable.' };
+}
+
+function cropRectCanvas(sourceCanvas, rect) {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(rect.width));
+  canvas.height = Math.max(1, Math.round(rect.height));
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(
+    sourceCanvas,
+    rect.x,
+    rect.y,
+    rect.width,
+    rect.height,
+    0,
+    0,
+    canvas.width,
+    canvas.height
+  );
+  return normalizePortraitCanvas(canvas);
+}
+
+function distance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function orderQuad(points) {
+  const pts = points.slice();
+  const sumSorted = pts.slice().sort((a, b) => (a.x + a.y) - (b.x + b.y));
+  const diffSorted = pts.slice().sort((a, b) => (a.y - a.x) - (b.y - b.x));
+  const topLeft = sumSorted[0];
+  const bottomRight = sumSorted[sumSorted.length - 1];
+  const topRight = diffSorted[0];
+  const bottomLeft = diffSorted[diffSorted.length - 1];
+  return [topLeft, topRight, bottomRight, bottomLeft];
+}
+
+function normalizePortraitCanvas(canvas) {
+  if (canvas.height >= canvas.width) return canvas;
+  const rotated = document.createElement('canvas');
+  rotated.width = canvas.height;
+  rotated.height = canvas.width;
+  const ctx = rotated.getContext('2d');
+  ctx.translate(rotated.width / 2, rotated.height / 2);
+  ctx.rotate(Math.PI / 2);
+  ctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
+  return rotated;
+}
+
+function detectCardAtPointCv(frameCanvas, clickX, clickY) {
+  const src = cv.imread(frameCanvas);
+  const gray = new cv.Mat();
+  const blur = new cv.Mat();
+  const edges = new cv.Mat();
+  const contours = new cv.MatVector();
+  const hierarchy = new cv.Mat();
+
+  try {
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
+    cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
+    cv.Canny(blur, edges, 60, 160);
+    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+    cv.dilate(edges, edges, kernel);
+    kernel.delete();
+    cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    const candidates = [];
+    for (let i = 0; i < contours.size(); i += 1) {
+      const contour = contours.get(i);
+      const area = cv.contourArea(contour);
+      if (area < src.cols * src.rows * 0.01) {
+        contour.delete();
+        continue;
+      }
+      const peri = cv.arcLength(contour, true);
+      const approx = new cv.Mat();
+      cv.approxPolyDP(contour, approx, 0.03 * peri, true);
+      if (approx.rows === 4 && cv.isContourConvex(approx)) {
+        const pts = [];
+        for (let r = 0; r < 4; r += 1) {
+          pts.push({ x: approx.intPtr(r, 0)[0], y: approx.intPtr(r, 0)[1] });
+        }
+        const ordered = orderQuad(pts);
+        const widthA = distance(ordered[2], ordered[3]);
+        const widthB = distance(ordered[1], ordered[0]);
+        const heightA = distance(ordered[1], ordered[2]);
+        const heightB = distance(ordered[0], ordered[3]);
+        const width = (widthA + widthB) / 2;
+        const height = (heightA + heightB) / 2;
+        const ratio = Math.min(width, height) / Math.max(width, height);
+        if (ratio > 0.55 && ratio < 0.78) {
+          const center = {
+            x: ordered.reduce((sum, p) => sum + p.x, 0) / 4,
+            y: ordered.reduce((sum, p) => sum + p.y, 0) / 4
+          };
+          const contains = cv.pointPolygonTest(contour, new cv.Point(clickX, clickY), false) >= 0;
+          const dist = Math.hypot(center.x - clickX, center.y - clickY);
+          candidates.push({ ordered, width, height, area, contains, dist });
+        }
+      }
+      approx.delete();
+      contour.delete();
+    }
+
+    if (!candidates.length) return null;
+
+    candidates.sort((a, b) => {
+      if (a.contains !== b.contains) return a.contains ? -1 : 1;
+      if (Math.abs(a.dist - b.dist) > 20) return a.dist - b.dist;
+      return b.area - a.area;
+    });
+
+    const chosen = candidates[0];
+    const targetWidth = 421;
+    const targetHeight = 614;
+    const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, chosen.ordered.flatMap(p => [p.x, p.y]));
+    const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, targetWidth, 0, targetWidth, targetHeight, 0, targetHeight]);
+    const matrix = cv.getPerspectiveTransform(srcTri, dstTri);
+    const warped = new cv.Mat();
+    cv.warpPerspective(src, warped, matrix, new cv.Size(targetWidth, targetHeight), cv.INTER_LINEAR, cv.BORDER_REPLICATE, new cv.Scalar());
+
+    const warpedCanvas = document.createElement('canvas');
+    warpedCanvas.width = targetWidth;
+    warpedCanvas.height = targetHeight;
+    cv.imshow(warpedCanvas, warped);
+    const portraitCanvas = normalizePortraitCanvas(warpedCanvas);
+
+    srcTri.delete();
+    dstTri.delete();
+    matrix.delete();
+    warped.delete();
+
+    return {
+      quad: chosen.ordered,
+      croppedCanvas: portraitCanvas,
+      note: chosen.contains ? 'Detected a card contour around your click.' : 'Detected the nearest card contour to your click.'
+    };
+  } finally {
+    src.delete();
+    gray.delete();
+    blur.delete();
+    edges.delete();
+    contours.delete();
+    hierarchy.delete();
+  }
+}
+
+function extractNameStrip(cardCanvas) {
+  const marginX = cardCanvas.width * 0.06;
+  const y = cardCanvas.height * 0.02;
+  const width = cardCanvas.width - marginX * 2;
+  const height = cardCanvas.height * 0.16;
+  const strip = document.createElement('canvas');
+  strip.width = Math.max(1, Math.round(width * 3));
+  strip.height = Math.max(1, Math.round(height * 3));
+  const ctx = strip.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(cardCanvas, marginX, y, width, height, 0, 0, strip.width, strip.height);
+
+  const imageData = ctx.getImageData(0, 0, strip.width, strip.height);
+  for (let i = 0; i < imageData.data.length; i += 4) {
+    const r = imageData.data[i];
+    const g = imageData.data[i + 1];
+    const b = imageData.data[i + 2];
+    const gray = (r * 0.299 + g * 0.587 + b * 0.114);
+    const value = gray > 140 ? 255 : 0;
+    imageData.data[i] = value;
+    imageData.data[i + 1] = value;
+    imageData.data[i + 2] = value;
+  }
+  ctx.putImageData(imageData, 0, 0);
+  return strip;
+}
+
+async function runOcrOnCanvas(cardCanvas) {
+  if (!ensureTesseract()) {
+    return { text: '', confidence: 0, note: 'Tesseract OCR was not available in the browser.' };
+  }
+  const strip = extractNameStrip(cardCanvas);
+  const result = await window.Tesseract.recognize(strip, 'eng', {
+    tessedit_pageseg_mode: '7',
+    tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.'&:/, "
+  });
+  return {
+    text: normalizeText(result?.data?.text || ''),
+    confidence: result?.data?.confidence || 0
+  };
+}
+
+async function scanOpponentAtClick(event) {
+  if (ocrInFlight) {
+    setSyncStatus('Already scanning a card.');
+    return;
+  }
+  if (!els.remoteVideo.srcObject || els.remoteVideo.readyState < 2) {
+    setSyncStatus('Opponent video is not ready yet.');
+    return;
+  }
+
+  ocrInFlight = true;
+  setModeBadge('Scan: Working...');
+  setSyncStatus('Capturing opponent frame...');
+
+  try {
+    const frameCanvas = captureVideoFrame(els.remoteVideo);
+    const point = displayPointToVideoPoint(event, els.remoteVideo, els.remoteOverlay);
+
+    let detection = null;
+    const cvAvailable = await waitForCv(2000);
+    if (cvAvailable) {
+      try {
+        detection = detectCardAtPointCv(frameCanvas, point.videoX, point.videoY);
+      } catch (error) {
+        detection = null;
+      }
+    }
+    if (!detection) {
+      detection = fallbackDetection(frameCanvas, point.videoX, point.videoY);
+    }
+
+    const displayPoints = (detection.quad || []).map(videoPoint => videoPointToDisplayPoint(videoPoint, point.mapping));
+    if (displayPoints.length === 4) flashSelectedQuad(displayPoints);
+
+    const imageUrl = detection.croppedCanvas.toDataURL('image/png');
+    showScanPreview({ imageUrl, title: 'Scanned crop', note: detection.note });
+
+    setSyncStatus('Running OCR on the card name...');
+    const ocr = await runOcrOnCanvas(detection.croppedCanvas);
+    const ocrText = ocr.text || '';
+
+    latestScan = {
+      imageUrl,
+      ocrText,
+      note: detection.note,
+      confidence: ocr.confidence || 0
+    };
+    showScanPreview({ imageUrl, title: 'Scanned crop', ocrText, note: detection.note });
+
+    if (!ocrText || ocrText.length < 3) {
+      renderSearchResults([], '', 'OCR could not confidently read the card name. Try clicking closer to the card center, improving lighting, or using manual search.');
+      setSyncStatus('OCR was too weak to identify the card.');
+      setModeBadge('Scan: Retry');
+      return;
+    }
+
+    setSyncStatus(`Searching card database for “${ocrText}”...`);
+    const cards = await lookupCandidatesFromOcr(ocrText);
+    if (!cards.length) {
+      renderSearchResults([], ocrText, `No confident card match found for OCR text “${ocrText}”. Try manual search.`);
+      setSyncStatus('No confident card match found.');
+      setModeBadge('Scan: Retry');
+      return;
+    }
+
+    renderSearchResults(cards, ocrText, `Scan candidates for OCR text “${ocrText}”.`);
+    showCardDetails(cards[0], {
+      ocrText,
+      note: cards.length > 1 ? 'Top match shown. Check the candidates list if this looks wrong.' : 'Single strong match found.'
+    });
+    setSyncStatus(cards.length > 1 ? 'Card candidates found.' : 'Card recognized.');
+    setModeBadge('Scan: Ready');
+  } catch (error) {
+    renderSearchResults([], '', 'Something went wrong during scan. Try again.');
+    setSyncStatus(`Scan error: ${error.message || 'unknown error'}`);
+    setModeBadge('Scan: Error');
+  } finally {
+    ocrInFlight = false;
+  }
+}
+
+els.startCameraBtn.onclick = startCamera;
+els.joinRoomBtn.onclick = () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) connectSocket();
+  else joinRoom();
+};
+els.copyRoomBtn.onclick = async () => {
+  const roomId = els.roomIdInput.value.trim() || 'duel-room';
+  const base = publicBaseUrl || location.origin;
+  const url = new URL(base);
+  url.searchParams.set('room', roomId);
+  await navigator.clipboard.writeText(url.toString());
+  setSyncStatus('Room link copied.');
+};
+els.searchBtn.onclick = () => searchCards();
+els.cardSearchInput.addEventListener('keydown', event => {
+  if (event.key === 'Enter') searchCards();
+});
+els.enableAudioBtn.onclick = async () => {
+  try {
+    els.remoteVideo.muted = !els.remoteVideo.muted;
+    await els.remoteVideo.play();
+    els.enableAudioBtn.textContent = els.remoteVideo.muted ? 'Enable Opponent Audio' : 'Mute Opponent Audio';
+    setSyncStatus(els.remoteVideo.muted ? 'Opponent audio muted.' : 'Opponent audio enabled.');
+  } catch {
+    setSyncStatus('Browser blocked opponent audio. Click the video, then Enable Opponent Audio again.');
+  }
+};
+
+els.selfLpInput.onchange = () => {
+  state.match.selfLp = Number(els.selfLpInput.value || 0);
+  pushState();
+};
+els.opponentLpInput.onchange = () => {
+  state.match.opponentLp = Number(els.opponentLpInput.value || 0);
+  pushState();
+};
+els.phaseSelect.onchange = () => {
+  state.match.phase = els.phaseSelect.value;
+  pushState();
+};
+
+document.querySelectorAll('[data-lp-target]').forEach(btn => {
+  btn.onclick = () => {
+    const target = btn.dataset.lpTarget;
+    const delta = Number(btn.dataset.lpDelta || 0);
+    const key = target === 'self' ? 'selfLp' : 'opponentLp';
+    state.match[key] += delta;
+    renderStateFields();
+    pushState();
+  };
+});
+
+els.remoteOverlay.addEventListener('click', scanOpponentAtClick);
+window.addEventListener('resize', resizeRemoteOverlay);
+window.addEventListener('beforeunload', () => {
+  if (stream) stream.getTracks().forEach(track => track.stop());
+  teardownPeer();
+  if (ws) ws.close();
+});
+
+(function initFromUrl() {
+  const params = new URLSearchParams(location.search);
+  const room = params.get('room');
+  if (room) els.roomIdInput.value = room;
+  els.playerNameInput.value = `Player-${playerId.slice(0, 4)}`;
+  renderAll();
+  loadRuntimeConfig().finally(() => loadCameras().catch(() => {}));
+  initializeCvWatch();
+  resizeRemoteOverlay();
+})();

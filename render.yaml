@@ -8,8 +8,6 @@ services:
     autoDeploy: false
     healthCheckPath: /health
     envVars:
-      - key: NODE_VERSION
-        value: 20
       - key: PUBLIC_BASE_URL
         sync: false
       - key: TURN_URL
